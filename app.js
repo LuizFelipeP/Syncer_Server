@@ -4,14 +4,13 @@ var path = require('path');
 var cookieParser = require('cookie-parser');
 var logger = require('morgan');
 var { Pool } = require('pg');
-var cors = require('cors');  // ADICIONAR ESSA LINHA
+var cors = require('cors');
 
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 
 var app = express();
-
-app.use(cors());  // ADICIONAR ESSA LINHA
+app.use(cors());
 
 // Configuração do PostgreSQL
 const pool = new Pool({
@@ -34,22 +33,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/api/', indexRouter);
 
-
-const formatDate = (date) => {
-  const options = {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  };
-  return new Date(date).toLocaleString('pt-BR', options);  // Formata a data como DD/MM/YYYY HH:mm
-};
-
-// Nova rota para adicionar uma despesa
-app.post('/api/add-expenses', async (req, res) => {
-  const expenses = req.body.expenses;  // Esperamos um array chamado "expenses"
+// Rota para adicionar ou sincronizar despesas (CRDT logic via POST)
+app.post('/api/sync', async (req, res) => {
+  const { expenses, timestamp } = req.body; // Esperamos um array de despesas e um timestamp
 
   if (!Array.isArray(expenses)) {
     return res.status(400).json({ error: 'O corpo da requisição deve conter um array de despesas' });
@@ -58,52 +44,59 @@ app.post('/api/add-expenses', async (req, res) => {
   try {
     const results = [];
     for (const expense of expenses) {
-      const { key: description, amount, user, date } = expense;
+      const { id, key, amount, user, date, timestamp } = expense;
 
-      // Insere cada gasto no banco de dados
-      const result = await pool.query(
-          'INSERT INTO expenses(description, amount, usuario, date) VALUES($1, $2, $3, $4) RETURNING *',
-          [description, amount, user || 'Desconhecido', date]
-      );
-      // Formatar os dados e a data antes de enviá-los de volta
-      const insertedExpense = result.rows[0];
-      insertedExpense.date = formatDate(insertedExpense.date);
-      insertedExpense.amount = `R$ ${parseFloat(insertedExpense.amount).toFixed(2)}`;
-      insertedExpense.user = insertedExpense.usuario || 'Desconhecido';  // Tratamento para usuário nulo
-      results.push(insertedExpense);
+      // Verifica se já existe a despesa no servidor
+      const existingExpense = await pool.query('SELECT * FROM expenses WHERE id = $1', [id]);
+
+      if (existingExpense.rows.length > 0) {
+        const serverExpense = existingExpense.rows[0];
+
+        // Verifica se o timestamp recebido é mais recente que o do servidor
+        if (timestamp > serverExpense.timestamp) {
+          // Atualiza o registro no banco de dados
+          const updatedExpense = await pool.query(
+              'UPDATE expenses SET descricao = $1, valor = $2, usuario = $3, data = $4, timestamp = $5 WHERE id = $6 RETURNING *',
+              [key, amount, user || 'Desconhecido', date, timestamp, id]
+          );
+          results.push(updatedExpense.rows[0]);
+        } else {
+          // Se os dados do servidor forem mais recentes, mantém o dado do servidor
+          results.push(serverExpense);
+        }
+      } else {
+        // Insere o dado se não existir
+        const newExpense = await pool.query(
+            'INSERT INTO expenses(id, descricao, valor, usuario, data, timestamp) VALUES($1, $2, $3, $4, $5, $6) RETURNING *',
+            [id, key, amount, user || 'Desconhecido', date, timestamp]
+        );
+        results.push(newExpense.rows[0]);
+      }
     }
 
-    res.status(201).json(results);  // Retorna todos os gastos inseridos formatados
+    res.status(201).json(results);  // Retorna todos os gastos sincronizados
   } catch (error) {
     console.error(error);
-    res.status(500).send('Erro ao inserir dados');
+    res.status(500).send('Erro ao sincronizar dados');
   }
 });
 
+// Rota para buscar todas as despesas atualizadas desde o último timestamp
+app.get('/api/sync', async (req, res) => {
+  const lastSyncTimestamp = req.query.lastSyncTimestamp;
 
-
-// Rota para buscar todas as despesas
-app.get('/api/expenses', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM expenses');
-
-    const formattedExpenses = result.rows.map(expense => {
-      return {
-        ...expense,
-        date: formatDate(expense.date),  // Formata a data
-        amount: `R$ ${parseFloat(expense.amount).toFixed(2)}`,  // Formata o valor
-        user: expense.usuario || 'Desconhecido'  // Substitui valores nulos por um padrão
-      };
-    });
-
-    res.json(formattedExpenses);  // Retorna os gastos formatados
+    // Busca todas as despesas que foram modificadas após o último timestamp do cliente
+    const result = await pool.query(
+        'SELECT * FROM expenses WHERE timestamp > $1',
+        [lastSyncTimestamp]
+    );
+    res.json(result.rows);  // Retorna os gastos
   } catch (error) {
     console.error(error);
-    res.status(500).send('Erro ao buscar despesas');
+    res.status(500).send('Erro ao buscar dados sincronizados');
   }
 });
-
-
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {
@@ -112,13 +105,11 @@ app.use(function(req, res, next) {
 
 // error handler
 app.use(function(err, req, res, next) {
-  // set locals, only providing error in development
   res.locals.message = err.message;
   res.locals.error = req.app.get('env') === 'development' ? err : {};
-
-  // render the error page
   res.status(err.status || 500);
   res.render('error');
 });
+
 
 module.exports = app;

@@ -13,7 +13,10 @@
     "http-errors": "~1.6.3",
     "morgan": "~1.9.1",
     "pg": "^8.13.0",
-    "pug": "2.0.0-beta11"
+    "pug": "2.0.0-beta11",
+    "ws": "^8.18.0",
+    "y-websocket": "^2.0.4",
+    "yjs": "^13.6.20"
   },
   "main": "app.js",
   "keywords": [],
